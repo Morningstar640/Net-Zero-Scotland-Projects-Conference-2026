@@ -6,6 +6,7 @@ const PAGE_IMAGES = Array.from(
 );
 
 const book = document.querySelector("#book");
+const stage = document.querySelector("#stage");
 const previousButton = document.querySelector("#previous");
 const nextButton = document.querySelector("#next");
 const pageStatus = document.querySelector("#pageStatus");
@@ -14,6 +15,9 @@ const mobileQuery = window.matchMedia("(max-width: 760px)");
 const TURN_MS = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 220 : 640;
 const DRAG_THRESHOLD = 0.24;
 const CLICK_SLOP = 7;
+const MAX_ZOOM = 4;
+const DOUBLE_TAP_ZOOM = 3;
+const DOUBLE_TAP_MS = 300;
 
 let isMobile = mobileQuery.matches;
 let pageIndex = 0;
@@ -22,6 +26,15 @@ let leaves = [];
 let interaction = null;
 let animationTimer = 0;
 let isAnimating = false;
+let zoom = 1;
+let panX = 0;
+let panY = 0;
+let pinchState = null;
+let panState = null;
+let zoomAnimationTimer = 0;
+let tapTimer = 0;
+let lastTouchTap = null;
+const activePointers = new Map();
 
 function pageFace(side, source, pageNumber) {
   const face = document.createElement("div");
@@ -118,6 +131,7 @@ function canTurn(direction) {
 
 function applyResponsiveModeIfNeeded() {
   if (mobileQuery.matches === isMobile) return false;
+  resetZoom(false);
   isMobile = mobileQuery.matches;
   if (isMobile) {
     pageIndex = spreadIndex === 0 ? 0 : Math.min(spreadIndex * 2, PAGE_IMAGES.length - 1);
@@ -132,6 +146,153 @@ function cancelAnimation() {
   window.clearTimeout(animationTimer);
   animationTimer = 0;
   isAnimating = false;
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.min(Math.max(value, minimum), maximum);
+}
+
+function clampPan() {
+  const maxX = Math.max(0, (book.offsetWidth * zoom - stage.clientWidth) / 2);
+  const maxY = Math.max(0, (book.offsetHeight * zoom - stage.clientHeight) / 2);
+  panX = clamp(panX, -maxX, maxX);
+  panY = clamp(panY, -maxY, maxY);
+}
+
+function applyZoom(animate = false) {
+  window.clearTimeout(zoomAnimationTimer);
+  book.classList.toggle("is-zoom-animating", animate);
+  stage.classList.toggle("is-zoomed", zoom > 1.001);
+  book.style.transform = zoom > 1.001
+    ? `translate3d(${panX}px, ${panY}px, 0) scale(${zoom})`
+    : "";
+  if (animate) {
+    zoomAnimationTimer = window.setTimeout(() => {
+      book.classList.remove("is-zoom-animating");
+    }, 240);
+  }
+}
+
+function setZoom(nextZoom, focalX, focalY, animate = false) {
+  const targetZoom = clamp(nextZoom, 1, MAX_ZOOM);
+  if (targetZoom === 1) {
+    zoom = 1;
+    panX = 0;
+    panY = 0;
+    applyZoom(animate);
+    return;
+  }
+
+  const bounds = stage.getBoundingClientRect();
+  const centerX = bounds.left + bounds.width / 2;
+  const centerY = bounds.top + bounds.height / 2;
+  const localX = (focalX - centerX - panX) / zoom;
+  const localY = (focalY - centerY - panY) / zoom;
+  zoom = targetZoom;
+  panX = focalX - centerX - localX * zoom;
+  panY = focalY - centerY - localY * zoom;
+  clampPan();
+  applyZoom(animate);
+}
+
+function resetZoom(animate = true) {
+  setZoom(1, 0, 0, animate);
+}
+
+function pointerDistance(first, second) {
+  return Math.hypot(second.x - first.x, second.y - first.y);
+}
+
+function pointerMidpoint(first, second) {
+  return {
+    x: (first.x + second.x) / 2,
+    y: (first.y + second.y) / 2
+  };
+}
+
+function discardPageInteraction() {
+  if (!interaction) return;
+  const state = interaction;
+  interaction = null;
+  if (!state.leaf) return;
+
+  if (isMobile) {
+    const current = book.querySelector(".mobile-current img");
+    if (current) {
+      current.src = PAGE_IMAGES[pageIndex];
+      current.alt = `Page ${pageIndex + 1}`;
+    }
+    state.leaf.remove();
+  } else {
+    syncDesktopLeaves();
+  }
+}
+
+function handleTouchTap(event, singleTapAction = null) {
+  const now = performance.now();
+  const isDoubleTap = lastTouchTap
+    && now - lastTouchTap.time <= DOUBLE_TAP_MS
+    && Math.hypot(event.clientX - lastTouchTap.x, event.clientY - lastTouchTap.y) < 36;
+
+  if (isDoubleTap) {
+    window.clearTimeout(tapTimer);
+    tapTimer = 0;
+    lastTouchTap = null;
+    if (zoom > 1.001) resetZoom(true);
+    else setZoom(DOUBLE_TAP_ZOOM, event.clientX, event.clientY, true);
+    return;
+  }
+
+  lastTouchTap = { time: now, x: event.clientX, y: event.clientY };
+  window.clearTimeout(tapTimer);
+  if (singleTapAction) {
+    tapTimer = window.setTimeout(() => {
+      lastTouchTap = null;
+      tapTimer = 0;
+      singleTapAction();
+    }, DOUBLE_TAP_MS);
+  }
+}
+
+function beginPinch() {
+  const points = [...activePointers.values()].slice(0, 2);
+  if (points.length < 2) return;
+  discardPageInteraction();
+  panState = null;
+  window.clearTimeout(tapTimer);
+  tapTimer = 0;
+  lastTouchTap = null;
+
+  const midpoint = pointerMidpoint(points[0], points[1]);
+  const bounds = stage.getBoundingClientRect();
+  const centerX = bounds.left + bounds.width / 2;
+  const centerY = bounds.top + bounds.height / 2;
+  pinchState = {
+    startDistance: Math.max(pointerDistance(points[0], points[1]), 1),
+    startZoom: zoom,
+    localX: (midpoint.x - centerX - panX) / zoom,
+    localY: (midpoint.y - centerY - panY) / zoom
+  };
+  stage.classList.add("is-panning");
+}
+
+function updatePinch(event) {
+  if (!pinchState || activePointers.size < 2) return;
+  const points = [...activePointers.values()].slice(0, 2);
+  const midpoint = pointerMidpoint(points[0], points[1]);
+  const bounds = stage.getBoundingClientRect();
+  const centerX = bounds.left + bounds.width / 2;
+  const centerY = bounds.top + bounds.height / 2;
+  zoom = clamp(
+    pinchState.startZoom * pointerDistance(points[0], points[1]) / pinchState.startDistance,
+    1,
+    MAX_ZOOM
+  );
+  panX = midpoint.x - centerX - pinchState.localX * zoom;
+  panY = midpoint.y - centerY - pinchState.localY * zoom;
+  clampPan();
+  applyZoom(false);
+  event.preventDefault();
 }
 
 function finishDesktopTurn(leaf, direction, committed) {
@@ -308,7 +469,14 @@ function endInteraction(event) {
   if (book.hasPointerCapture(event.pointerId)) book.releasePointerCapture(event.pointerId);
 
   if (!state.direction || !state.leaf) {
-    if (!state.moved) turn(possibleDirection(event.clientX));
+    if (!state.moved) {
+      const direction = possibleDirection(event.clientX);
+      if (event.pointerType === "touch") {
+        handleTouchTap(event, () => turn(direction));
+      } else {
+        turn(direction);
+      }
+    }
     else applyResponsiveModeIfNeeded();
     return;
   }
@@ -336,14 +504,142 @@ function cancelInteraction(event) {
   else animateDesktop(state.direction, false, startAngle);
 }
 
+function handlePointerDown(event) {
+  if (isAnimating || event.button > 0) return;
+  activePointers.set(event.pointerId, {
+    x: event.clientX,
+    y: event.clientY,
+    pointerType: event.pointerType
+  });
+  book.setPointerCapture(event.pointerId);
+
+  if (activePointers.size >= 2) {
+    beginPinch();
+    return;
+  }
+
+  if (zoom > 1.001) {
+    panState = {
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      startX: event.clientX,
+      startY: event.clientY,
+      startPanX: panX,
+      startPanY: panY,
+      moved: false
+    };
+    stage.classList.add("is-panning");
+    return;
+  }
+
+  beginInteraction(event);
+}
+
+function handlePointerMove(event) {
+  if (!activePointers.has(event.pointerId)) return;
+  activePointers.set(event.pointerId, {
+    x: event.clientX,
+    y: event.clientY,
+    pointerType: event.pointerType
+  });
+
+  if (pinchState && activePointers.size >= 2) {
+    updatePinch(event);
+    return;
+  }
+
+  if (panState && panState.pointerId === event.pointerId && zoom > 1.001) {
+    const deltaX = event.clientX - panState.startX;
+    const deltaY = event.clientY - panState.startY;
+    panState.moved ||= Math.hypot(deltaX, deltaY) > CLICK_SLOP;
+    panX = panState.startPanX + deltaX;
+    panY = panState.startPanY + deltaY;
+    clampPan();
+    applyZoom(false);
+    event.preventDefault();
+    return;
+  }
+
+  moveInteraction(event);
+  if (interaction?.moved) {
+    window.clearTimeout(tapTimer);
+    tapTimer = 0;
+    lastTouchTap = null;
+  }
+}
+
+function releasePointer(event) {
+  if (book.hasPointerCapture(event.pointerId)) {
+    book.releasePointerCapture(event.pointerId);
+  }
+}
+
+function handlePointerUp(event) {
+  if (!activePointers.has(event.pointerId)) return;
+
+  if (pinchState) {
+    activePointers.delete(event.pointerId);
+    releasePointer(event);
+    if (activePointers.size < 2) {
+      pinchState = null;
+      stage.classList.remove("is-panning");
+      if (zoom <= 1.01) {
+        resetZoom(true);
+      } else if (activePointers.size === 1) {
+        const [pointerId, point] = activePointers.entries().next().value;
+        panState = {
+          pointerId,
+          pointerType: point.pointerType,
+          startX: point.x,
+          startY: point.y,
+          startPanX: panX,
+          startPanY: panY,
+          moved: true
+        };
+        stage.classList.add("is-panning");
+      }
+    }
+    if (activePointers.size === 0) applyResponsiveModeIfNeeded();
+    return;
+  }
+
+  if (panState && panState.pointerId === event.pointerId) {
+    const state = panState;
+    panState = null;
+    activePointers.delete(event.pointerId);
+    releasePointer(event);
+    stage.classList.remove("is-panning");
+    if (!state.moved && state.pointerType === "touch") {
+      handleTouchTap(event);
+    }
+    applyResponsiveModeIfNeeded();
+    return;
+  }
+
+  endInteraction(event);
+  activePointers.delete(event.pointerId);
+  applyResponsiveModeIfNeeded();
+}
+
+function handlePointerCancel(event) {
+  activePointers.delete(event.pointerId);
+  if (interaction?.pointerId === event.pointerId) cancelInteraction(event);
+  if (panState?.pointerId === event.pointerId) panState = null;
+  if (activePointers.size < 2) pinchState = null;
+  if (activePointers.size === 0) stage.classList.remove("is-panning");
+  releasePointer(event);
+  if (activePointers.size === 0) applyResponsiveModeIfNeeded();
+}
+
 previousButton.addEventListener("click", () => turn(-1));
 nextButton.addEventListener("click", () => turn(1));
-book.addEventListener("pointerdown", beginInteraction);
-book.addEventListener("pointermove", moveInteraction, { passive: false });
-book.addEventListener("pointerup", endInteraction);
-book.addEventListener("pointercancel", cancelInteraction);
+book.addEventListener("pointerdown", handlePointerDown);
+book.addEventListener("pointermove", handlePointerMove, { passive: false });
+book.addEventListener("pointerup", handlePointerUp);
+book.addEventListener("pointercancel", handlePointerCancel);
 book.addEventListener("contextmenu", (event) => event.preventDefault());
 book.addEventListener("dragstart", (event) => event.preventDefault());
+book.addEventListener("gesturestart", (event) => event.preventDefault());
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "ArrowRight") {
@@ -356,8 +652,14 @@ document.addEventListener("keydown", (event) => {
 });
 
 mobileQuery.addEventListener("change", (event) => {
-  if (interaction || isAnimating) return;
+  if (interaction || isAnimating || activePointers.size) return;
   applyResponsiveModeIfNeeded();
+});
+
+window.addEventListener("resize", () => {
+  if (zoom <= 1.001) return;
+  clampPan();
+  applyZoom(false);
 });
 
 PAGE_IMAGES.forEach((source) => {

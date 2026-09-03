@@ -65,6 +65,11 @@ button,
   place-items: center;
   perspective: 2400px;
   perspective-origin: 50% 48%;
+  overscroll-behavior: contain;
+}
+
+.stage.is-zoomed {
+  overflow: hidden;
 }
 
 .book {
@@ -78,6 +83,20 @@ button,
   filter: drop-shadow(0 24px 28px rgb(0 0 0 / 0.32));
   isolation: isolate;
   border-radius: 0;
+  transform-origin: center center;
+  will-change: transform;
+}
+
+.book.is-zoom-animating {
+  transition: transform 220ms cubic-bezier(.2, .72, .26, 1);
+}
+
+.stage.is-zoomed .book {
+  cursor: grab;
+}
+
+.stage.is-panning .book {
+  cursor: grabbing;
 }
 
 .book::before {
@@ -225,16 +244,16 @@ button,
 
 @media (max-width: 760px) {
   .reader {
-    padding-inline: 18px;
+    padding: 16px 12px 20px;
   }
 
   .stage {
-    width: min(560px, calc(100vw - 36px));
-    height: min(746px, calc(100svh - 230px));
+    width: min(560px, calc(100vw - 24px));
+    height: min(746px, calc(100svh - 205px));
   }
 
   .book {
-    width: min(100%, calc((100svh - 230px) * var(--page-ratio)));
+    width: min(100%, calc((100svh - 205px) * var(--page-ratio)));
     aspect-ratio: 595.28 / 841.89;
   }
 

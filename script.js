@@ -2,7 +2,7 @@
 const PAGE_COUNT = 14;
 const PAGE_IMAGES = Array.from(
   { length: PAGE_COUNT },
-  (_, index) => `pages/Page - ${index + 1}.webp`
+  (_, index) => `./Page%20-%20${index + 1}.webp`
 );
 
 const book = document.querySelector("#book");
